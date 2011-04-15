@@ -9,6 +9,7 @@ var util = require('util'),
     Buffy = require('./deps/buffy'),
     respsML = [100, 101, 215, 220, 221, 222, 224, 225, 230, 231],
     respsHaveArgs = [111, 211, 220, 221, 222, 223, 401],
+    bytesCRLF = [13, 10],
     debug = false;
 
 var NNTP = module.exports = function(options) {
@@ -17,6 +18,7 @@ var NNTP = module.exports = function(options) {
   this._MLEmitter = undefined;
   this._caps = undefined;
   this._buffer = false;
+  this._buffy = undefined;
   this._curGroup = undefined;
   this._queue = [];
   this.options = {
@@ -69,20 +71,19 @@ NNTP.prototype.connect = function(port, host) {
     self.emit('error', err);
   });
   var code = undefined, text, hasProcessed = false, isML = false, idxCRLF,
-      idxStart = 0, buffy, idxBStart = 0, idxBCRLF, bytesCRLF = [13, 10];
+      idxStart = 0, idxBStart = 0, idxBCRLF;
   socket.on('data', function(data) {
-    if (self._buffer) {
-      if (!buffy)
-        buffy = new Buffy();
-      buffy.append(data);
-    }
+    if (self._buffer)
+      self._buffy.append(data);
     curData += data;
-    while ((idxCRLF = curData.indexOf('\r\n', idxStart)) > -1) {
+    while ((idxCRLF = curData.indexOf('\r\n', idxStart)) > -1
+           || (self._buffer &&
+               (idxBCRLF = self._buffy.indexOf(bytesCRLF, idxBStart)) > -1)) {
       if (self._buffer) {
-        var r = buffy.GCBefore(idxBStart);
+        var r = self._buffy.GCBefore(idxBStart);
         if (r > 0 && idxBStart > 0)
           idxBStart -= r;
-        idxBCRLF = buffy.indexOf(bytesCRLF, idxBStart);
+        idxBCRLF = self._buffy.indexOf(bytesCRLF, idxBStart);
       }
       hasProcessed = true;
       if (!code) {
@@ -162,37 +163,29 @@ NNTP.prototype.connect = function(port, host) {
       } else {
         // continued response
         if ((idxCRLF - idxStart === 1 && curData[idxStart] === '.')
-            || (self._buffer && idxBCRLF - idxBStart === 1 && buffy.get(0) === 46)) {
+            || (self._buffer && idxBCRLF - idxBStart === 1 && self._buffy.get(0) === 46)) {
           code = undefined;
-          self._buffer = false;
-          buffy = undefined;
+          self._setBinMode(false);
           self._MLEmitter.emit('end');
           self.send();
         } else if (self._buffer) {
-          var size;
-          if (idxBCRLF === idxBStart)
-            size = 2;
-          else {
-            size = (idxBCRLF - idxBStart) + 1;
-            if (size >= 2 && buffy.get(idxBStart) === 46) {
-              // for "dot-stuffed" lines
-              --size;
-              ++idxBStart;
-            }
+          var size = (idxBCRLF - idxBStart);
+          if (size >= 2 && self._buffy.get(idxBStart) === 46) {
+            // for "dot-stuffed" lines
+            --size;
+            ++idxBStart;
           }
           var buf = new Buffer(size);
-          if (idxBCRLF !== idxBStart) {
-            buffy.copy(buf, 0, idxBStart, idxBCRLF);
-            
-          } else {
-            buf.write('\r\n', 0, 'ascii');
-          }
+          if (idxBCRLF !== idxBStart)
+            self._buffy.copy(buf, 0, idxBStart, idxBCRLF);
           self._MLEmitter.emit('line', buf);
         } else
           self._MLEmitter.emit('line', curData.substring(idxStart, idxCRLF));
       }
-      idxStart = idxCRLF + 2;
-      idxBStart = idxBCRLF + 2;
+      if (idxCRLF > -1)
+        idxStart = idxCRLF + 2;
+      if (idxBCRLF > -1)
+        idxBStart = idxBCRLF + 2;
     }
     if (hasProcessed) {
       if (idxStart >= curData.length)
@@ -200,13 +193,13 @@ NNTP.prototype.connect = function(port, host) {
       else
         curData = curData.substring(idxStart);
       if (self._buffer) {
-        if (idxBStart >= buffy.length)
-          buffy = new Buffy();
+        if (idxBStart >= self._buffy.length)
+          self._buffy = new Buffy();
         else {
-          var buf = new Buffer(buffy.length - idxBStart);
-          buffy.copy(buf, 0, idxBStart);
-          buffy = new Buffy();
-          buffy.append(buf);
+          var buf = new Buffer(self._buffy.length - idxBStart);
+          self._buffy.copy(buf, 0, idxBStart);
+          self._buffy = new Buffy();
+          self._buffy.append(buf);
         }
         idxBStart = 0;
       }
@@ -459,7 +452,7 @@ NNTP.prototype.body = function(who, cb) {
     who = undefined;
   }
   var self = this;
-  this._buffer = true;
+  this._setBinMode(true);
   return this.send('BODY', who, function(e, mle, msgid) {
     if (e)
       return cb(e);
@@ -468,7 +461,6 @@ NNTP.prototype.body = function(who, cb) {
       emitter.emit('line', line);
     });
     mle.on('end', function() {
-      self._buffer = false;
       emitter.emit('end');
     });
     cb(undefined, emitter, msgid);
@@ -483,15 +475,17 @@ NNTP.prototype.article = function(who, cb) {
     who = undefined;
   }
   var self = this;
+  this._setBinMode(true);
   return this.send('ARTICLE', who, function(e, mle, msgid) {
     if (e)
       return cb(e);
     var emitter = new EventEmitter(), prevField, prevVal, inHeaders = true;
     mle.on('line', function(line) {
       if (inHeaders) {
-        if (/^\s+/.test(line)) {
+        line = ''+line;
+        if (/^[\t ]/.test(line))
           prevVal += line;
-        } else if (line.length) {
+        else if (line.length) {
           if (prevField)
             emitter.emit('header', prevField, prevVal);
           var idxSep = line.indexOf(": ");
@@ -501,11 +495,8 @@ NNTP.prototype.article = function(who, cb) {
           emitter.emit('header', prevField, prevVal);
           inHeaders = false;
         }
-      } else {
-        mle.on('line', function(line) {
-          emitter.emit('line', (/^\.\./.test(line) ? line.substring(1) : line));
-        });
-      }
+      } else
+        emitter.emit('line', line);
     });
     mle.on('end', function() {
       emitter.emit('end');
@@ -546,6 +537,16 @@ NNTP.prototype.send = function(cmd, params, cb) {
   }
 
   return true;
+};
+
+NNTP.prototype._setBinMode = function(isBinary) {
+  if (isBinary) {
+    this._buffy = new Buffy();
+    this._buffer = true;
+  } else {
+    this._buffer = false;
+    this._buffy = undefined;
+  }
 };
 
 NNTP.prototype._refreshCaps = function(cb) {
@@ -626,8 +627,6 @@ function parseInitLine(code, text) {
       ret.count = 0;
     else
       ret.count = text[0];
-    /*ret.minArticleNum = text[1];
-    ret.maxArticleNum = text[2];*/
   } else if (code >= 220 && code <= 223) {
     // just return the message-id
     var idxSP = text.indexOf(' ');

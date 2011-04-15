@@ -8,7 +8,7 @@ Buffy.prototype.append = function(buffer) {
 };
 Buffy.prototype.indexOf = function(bytes, start) {
   if (start && (start < 0 || start >= this._length))
-    throw new Error('OOB');
+    return -1;//throw new Error('OOB');
   if (typeof bytes === 'number')
     bytes = [bytes];
   start = start || 0;
@@ -79,7 +79,7 @@ Buffy.prototype.copy = function(destBuffer, destStart, srcStart, srcEnd) {
       || srcStart > srcEnd || destStart + (srcEnd-srcStart) > destBuffer.length)
     throw new Error('OOB');
   if (srcStart !== srcEnd) {
-    var foundStart = false, totalBytes = (srcEnd-srcStart)+1,
+    var foundStart = false, totalBytes = (srcEnd-srcStart),
         buflen, destPos = destStart;
     for (var bn=0,len=this._store.length; bn<len; ++bn) {
       buflen = this._store[bn].length;
@@ -171,10 +171,42 @@ Buffy.prototype.set = function(index, value) {
   return ret;
 };
 Buffy.prototype.toString = function(encoding, start, end) {
-  var ret = '';
-  for (var i=0,len=this._store.length; i<len; ++i)
-    ret += this._store[i].toString();
-  return ret;
+  var ret = new Array();
+  if (typeof end === 'undefined')
+    end = this._length;
+  start = start || 0;
+  if (start < 0 || start > this._length || end > this._length || start > end)
+    throw new Error('OOB');
+  if (start !== end) {
+    if (start === 0 && end === this._length) {
+      // simple case
+      for (var i=0,len=this._store.length; i<len; ++i)
+        ret.push(this._store[i].toString(encoding));
+    } else {
+      var foundStart = false, totalBytes = (end-start),
+          buflen, destPos = 0;
+      for (var bn=0,len=this._store.length; bn<len; ++bn) {
+        buflen = this._store[bn].length;
+        if (!foundStart) {
+          if (start >= buflen)
+            start -= buflen;
+          else
+            foundStart = true;
+        }
+        if (foundStart) {
+          if ((totalBytes - destPos) <= (buflen - start)) {
+            ret.push(this._store[bn].toString(encoding, start, start + (totalBytes - destPos)));
+            break;
+          } else {
+            ret.push(this._store[bn].toString(encoding, start, buflen));
+            destPos += (buflen - start);
+            start = 0;
+          }
+        }
+      }
+    }
+  }
+  return ret.join('');
 };
 Buffy.prototype.inspect = function() {
   var len = this._store.length, ret = '<Buffy' + (len === 0 ? ' ' : '');
