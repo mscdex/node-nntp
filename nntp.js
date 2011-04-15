@@ -305,7 +305,7 @@ NNTP.prototype.groupsDescr = function(search, cb) {
     var emitter = new EventEmitter();
     mle.on('line', function(line) {
       line = line.match(reMatch);
-      emitter.emit('group', line[1], line[2]);
+      emitter.emit('description', line[1], line[2]);
     });
     mle.on('end', function() {
       emitter.emit('end');
@@ -322,8 +322,7 @@ NNTP.prototype.dateTime = function(cb) {
 };
 
 NNTP.prototype.articlesSince = function(search, date8, time6, cb) {
-  if (!this._state || typeof search === 'function'
-      || typeof date8 === 'function'
+  if (!this._state || typeof search !== 'string' || typeof date8 === 'function'
       || (typeof time6 === 'function' && !(date8 instanceof Date)))
     return false;
   if (typeof time6 === 'function') {
@@ -345,7 +344,7 @@ NNTP.prototype.articlesSince = function(search, date8, time6, cb) {
       return cb(e);
     var emitter = new EventEmitter();
     mle.on('line', function(line) {
-      emitter.emit('articleId', line);
+      emitter.emit('messageID', line);
     });
     mle.on('end', function() {
       emitter.emit('end');
@@ -392,7 +391,7 @@ NNTP.prototype.articlePrev = function(cb) {
 };
 
 NNTP.prototype.post = function(msg, cb) {
-  if (!this._state || !msg || Object.keys(msg))
+  if (!this._state || !msg || Object.keys(msg).length)
     return false;
 
   var self = this, composing = true;
