@@ -69,8 +69,12 @@ else {
           console.log('Main :: Worker #' + wnum + ' is decoding part '
                       + m.data.part + '/' + m.data.total + ' ...');
         } else if (m.data.event === 'done') {
-          console.log('Main :: Worker #' + wnum + ' finished downloading file: '
-                      + m.data.filename);
+          if (m.data.corrupt)
+            console.log('Main :: Worker #' + wnum
+                        + ' detected a corrupt part, part filename marked ...');
+          else
+            console.log('Main :: Worker #' + wnum + ' finished file: '
+                        + m.data.filename);
           if (nzb.file.length) {
             var m = { config: config };
             if (user || pass)

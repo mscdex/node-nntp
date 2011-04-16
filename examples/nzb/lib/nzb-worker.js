@@ -16,16 +16,16 @@ function postError(e) {
   postMessage({ event: 'error', err: e });
 }
 
-function decodeArticles(ids, index, filename) {
+function decodeArticles(ids, index, path, filename) {
   index = index || 0;
   postMessage({ event: 'decode', part: index+1, total: ids.length });
-  var path;
   if (index === 0) {
     path = pathComplete + Date.now();
     fs.mkdirSync(path, '0777');
     path += '/';
   }
-  var stream = ydec(fs.createReadStream(pathTemp + ids[index]));
+  var stream = ydec(fs.createReadStream(pathTemp + ids[index])),
+      corrupt = false;
   stream.on('data', function(data) {
     out.write(data);
   });
@@ -35,13 +35,24 @@ function decodeArticles(ids, index, filename) {
       out = fs.createWriteStream(path + filename);
     });
   }
+  stream.on('yend', function(yend) {
+    if (!yend.crcMatches)
+      corrupt = true;
+  });
   stream.on('end', function() {
-    fs.unlink(pathTemp + ids[index]);
-    if (++index < ids.length)
-      process.nextTick(function() { decodeArticles(ids, index, filename); });
-    else {
+    if (!corrupt) {
+      fs.unlink(pathTemp + ids[index]);
+      if (++index < ids.length)
+        process.nextTick(function() { decodeArticles(ids, index, path, filename); });
+      else {
+        out.end();
+        postMessage({ event: 'done', filename: filename });
+      }
+    } else {
       out.end();
-      postMessage({ event: 'done', filename: filename });
+      fs.unlink(path + filename);
+      fs.renameSync(pathTemp + ids[index], pathTemp + 'corrupt_' + ids[index]);
+      postMessage({ event: 'done', filename: filename, corrupt: true });
     }
   });
 }
