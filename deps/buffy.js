@@ -53,7 +53,7 @@ Buffy.prototype.indexOf = function(bytes, start) {
   return ret;
 };
 Buffy.prototype.GCBefore = function(index) {
-  if (index < 0 || index >= this._length)
+  if (index < 0 || index > this._length)
     throw new Error('OOB');
   var toRemove = 0, amount = 0;
   for (var bn=0,i=0,len=this._store.length; bn<len; ++bn) {

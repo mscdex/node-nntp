@@ -20,6 +20,7 @@ var NNTP = module.exports = function(options) {
   this._buffer = false;
   this._buffy = undefined;
   this._curGroup = undefined;
+  this._curReq = undefined;
   this._queue = [];
   this.options = {
     host: 'localhost',
@@ -166,17 +167,21 @@ NNTP.prototype.connect = function(port, host) {
             || (self._buffer && idxBCRLF - idxBStart === 1 && self._buffy.get(0) === 46)) {
           code = undefined;
           self._setBinMode(false);
+          idxBStart = 0;
+          idxBCRLF = -1;
           self._MLEmitter.emit('end');
-          self.send();
+          process.nextTick(function() { self.send(); });
         } else if (self._buffer) {
           var size = (idxBCRLF - idxBStart);
+          if (size < 0)
+            size = 0;
           if (size >= 2 && self._buffy.get(idxBStart) === 46) {
             // for "dot-stuffed" lines
             --size;
             ++idxBStart;
           }
           var buf = new Buffer(size);
-          if (idxBCRLF !== idxBStart)
+          if (idxBCRLF > idxBStart)
             self._buffy.copy(buf, 0, idxBStart, idxBCRLF);
           self._MLEmitter.emit('line', buf);
         } else
@@ -528,8 +533,9 @@ NNTP.prototype.send = function(cmd, params, cb) {
       this._queue.push([cmd, params, cb]);
   }
   if (this._queue.length) {
-    var fullcmd = this._queue[0][0]
-                  + (this._queue[0].length === 3 ? ' ' + this._queue[0][1] : '');
+    this._curReq = this._queue.shift();
+    var fullcmd = this._curReq[0]
+                  + (this._curReq.length === 3 ? ' ' + this._curReq[1] : '');
     if (debug)
       debug('> ' + fullcmd);
     this._socket.write(fullcmd + '\r\n');
@@ -574,13 +580,14 @@ NNTP.prototype._refreshCaps = function(cb) {
 };
 
 NNTP.prototype._callCb = function(arg1, arg2) {
-  if (!this._queue.length)
+  if (!this._curReq)
     return;
-  var req = this._queue.shift(), cb = (req.length === 3 ? req[2] : req[1]);
+  var req = this._curReq, cb = (req.length === 3 ? req[2] : req[1]);
+  this._curReq = undefined;
+
   if (!cb)
     return;
-
-  if (arg1 instanceof Error)
+  else if (arg1 instanceof Error)
     cb(arg1);
   else if (typeof arg1 !== 'undefined' && arg2 !== 'undefined')
     cb(undefined, arg1, arg2);
