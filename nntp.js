@@ -282,7 +282,7 @@ NNTP.prototype.groups = function(search, skipEmpty, cb) {
       var first = parseInt(line[1], 10);
       var second = parseInt(line[2], 10);
       var status = line[3];
-      var msgCount = (line[1] - line[2]) + 1;
+      var msgCount = (first - second) + 1;
       if (first === 10000000000000000 || second === 10000000000000000)
         msgCount += 1;
       if (!skipEmpty || msgCount > 0)
