@@ -277,15 +277,16 @@ NNTP.prototype.groups = function(search, skipEmpty, cb) {
       return cb(e);
     var emitter = new EventEmitter();
     mle.on('line', function(line) {
-      var msgCount;
       line = line.split(' ');
-      line[1] = parseInt(line[1], 10);
-      line[2] = parseInt(line[2], 10);
-      msgCount = (line[1] - line[2]) + 1;
-      if (line[1] === 10000000000000000 || line[2] === 10000000000000000)
+      var name = line[0];
+      var first = parseInt(line[1], 10);
+      var second = parseInt(line[2], 10);
+      var status = line[3];
+      var msgCount = (line[1] - line[2]) + 1;
+      if (first === 10000000000000000 || second === 10000000000000000)
         msgCount += 1;
       if (!skipEmpty || msgCount > 0)
-        emitter.emit('group', name, count, status);
+        emitter.emit('group', name, msgCount, status);
     });
     mle.on('end', function() {
       emitter.emit('end');
