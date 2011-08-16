@@ -15,7 +15,7 @@ Examples
 
 ### Setup/Initialization code
 
-    var NNTP = require('./nntp'), inspect = require('util').inspect, conn;
+    var NNTPClient = require('./nntp'), inspect = require('util').inspect, conn;
 
     // Be lazy and always exit the process on any error
     function die(e) {
