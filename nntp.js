@@ -2,6 +2,7 @@
  *  TODO: - keepalive timer (< 3 min intervals)
  *        - TLS support (port 563)
  */
+ 
 
 var util = require('util'),
     net = require('net'),
@@ -128,8 +129,9 @@ NNTP.prototype.connect = function(port, host) {
                 (cur.length === 3 ? cur[2] : cur[1])();
             } else {
               if (respsHaveArgs.indexOf(code) > -1) {
-                if (isML)
+                if (isML){
                   self._callCb(self._MLEmitter, text);
+                }
                 else
                   self._callCb(text);
               } else if (isML)
@@ -397,13 +399,15 @@ NNTP.prototype.articlePrev = function(cb) {
 };
 
 NNTP.prototype.post = function(msg, cb) {
-  if (!this._state || !msg || Object.keys(msg).length)
+
+  if (!this._state || !msg || !Object.keys(msg).length)
     return false;
 
   var self = this, composing = true;
   return this.send('POST', function(e) {
-    if (e || !composing)
-      return cb(e);
+    if (e || !composing){
+      	return cb(e);
+    }
     composing = false;
     var CRLF = '\r\n',
         text = 'From: "' + msg.from.name + '" <' + msg.from.email + '>' + CRLF
@@ -416,6 +420,7 @@ NNTP.prototype.post = function(msg, cb) {
                        .replace(/^\.([^.]*?)/gm, '..$1');
     self._socket.write(text + '\r\n.\r\n');
   });
+  
 };
 
 NNTP.prototype.headers = function(who, cb) {
@@ -520,7 +525,7 @@ NNTP.prototype.article = function(who, cb) {
 
 NNTP.prototype.send = function(cmd, params, cb) {
   if (!this._socket || !this._socket.writable)
-    return false;
+    	return false;
 
   if (cmd) {
     cmd = (''+cmd).toUpperCase();
@@ -534,14 +539,15 @@ NNTP.prototype.send = function(cmd, params, cb) {
       this._queue.push([cmd, params, cb]);
   }
   if (this._queue.length) {
-    this._curReq = this._queue.shift();
-    var fullcmd = this._curReq[0]
-                  + (this._curReq.length === 3 ? ' ' + this._curReq[1] : '');
+  	if (this._queue[0][0] === 'POST')
+  		this._curReq = this._queue[0];
+  	else
+    	this._curReq = this._queue.shift();
+    var fullcmd = this._curReq[0] + (this._curReq.length === 3 ? ' ' + this._curReq[1] : '');
     if (debug)
       debug('> ' + fullcmd);
     this._socket.write(fullcmd + '\r\n');
   }
-
   return true;
 };
 
