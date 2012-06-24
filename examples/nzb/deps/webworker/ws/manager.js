@@ -1,5 +1,5 @@
 var Events = require("events")
-  , sys    = require("sys");
+  , util = require('util');
 
 var debug;
 
@@ -10,7 +10,7 @@ module.exports = Manager;
 
 function Manager(showDebug){
   if(showDebug) {
-    debug = function(){sys.error('\033[31mManager: ' + Array.prototype.join.call(arguments, ", ") + "\033[39m"); };
+    debug = function(){util.error('\033[31mManager: ' + Array.prototype.join.call(arguments, ", ") + "\033[39m"); };
   } else {
     debug = function(){};
   }
