@@ -1,5 +1,5 @@
 
-var sys = require("sys")
+var util = require('util')
   , events = require("events")
   , Buffer = require("buffer").Buffer
   , Crypto = require("crypto");
@@ -19,7 +19,7 @@ function Connection(server, req, socket, upgradeHead){
   this.debug = server.debug;
   
   if (this.debug) {
-    debug = function () { sys.error('\033[90mWS: ' + Array.prototype.join.call(arguments, ", ") + "\033[39m"); };
+    debug = function () { util.error('\033[90mWS: ' + Array.prototype.join.call(arguments, ", ") + "\033[39m"); };
   } else {
     debug = function () { };
   }
@@ -101,7 +101,7 @@ function Connection(server, req, socket, upgradeHead){
   }
 };
 
-sys.inherits(Connection, events.EventEmitter);
+util.inherits(Connection, events.EventEmitter);
 
 /*-----------------------------------------------
   Various utility style functions:
