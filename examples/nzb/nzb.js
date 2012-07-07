@@ -1,6 +1,11 @@
-var path = require('path'), Worker = require('./deps/webworker').Worker,
+var path = require('path'),
+    fs = require('fs'),
+    Worker = require('./deps/webworker').Worker,
     parser = require('./deps/sax').parser(true),
     inspect = require('util').inspect;
+
+if (!fs.existsSync)
+  fs.existsSync = path.existsSync;
 
 var argv = process.argv, argc = argv.length, workers = [];
 if (argc < 4)
@@ -11,7 +16,7 @@ else {
   if ((!(isStdin = (where === '-'))
         && !(isHTTPS = (where.substring(0,5).toLowerCase() === 'https'))
         && !(isHTTP = (where.substring(0,4).toLowerCase() === 'http'))
-        && !(isFile = (path.existsSync(where = path.resolve(where)))))
+        && !(isFile = (fs.existsSync(where = path.resolve(where)))))
       || !(host=host.match(/^(.+?)(?:\:(\d+))?$/)))
     usage();
 
