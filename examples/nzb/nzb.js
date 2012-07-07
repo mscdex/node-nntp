@@ -11,7 +11,7 @@ else {
   if ((!(isStdin = (where === '-'))
         && !(isHTTPS = (where.substring(0,5).toLowerCase() === 'https'))
         && !(isHTTP = (where.substring(0,4).toLowerCase() === 'http'))
-        && !(isFile = (path.existsSync(where = path.resolve(where)))))
+        && !(isFile = (fs.existsSync(where = path.resolve(where)))))
       || !(host=host.match(/^(.+?)(?:\:(\d+))?$/)))
     usage();
 
