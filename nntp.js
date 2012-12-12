@@ -1,607 +1,691 @@
 /*
  *  TODO: - keepalive timer (< 3 min intervals)
- *        - TLS support (port 563)
  */
 
-var util = require('util'),
-    net = require('net'),
+var tls = require('tls'),
+    Socket = require('net').Socket,
     EventEmitter = require('events').EventEmitter,
-    Buffy = require('./deps/buffy'),
+    Stream = require('stream'),
+    util = require('util'),
+    inherits = util.inherits,
+    SBMH = require('streamsearch'),
+    reCRLF = /\r\n/g,
+    reListActive = /^(.+)\s+(\d+)\s+(\d+)\s+(.+)$/,
+    reGroupDesc = /^([^\s]+)\s+(.+)$/,
+    reStat = /^(\d+)\s+(.+)$/,
+    reGroup = /^(\d+)\s+(\d+)\s+(\d+)\s/,
+    reHdr = /^([^:]+):\s(.+)?$/,
+    reHdrFold = /^\s+(.+)$/,
     respsML = [100, 101, 215, 220, 221, 222, 224, 225, 230, 231],
     respsHaveArgs = [111, 211, 220, 221, 222, 223, 401],
-    bytesCRLF = [13, 10],
-    debug = false;
+    bytesCRLF = new Buffer([13, 10]),
+    bytesMLTerm = new Buffer([13, 10, 46, 13, 10]),
+    TYPE = {
+      CONNECTION: 0,
+      GROUP: 1,
+      ARTICLE: 2,
+      DISTRIBUTION: 3,
+      POST: 4,
+      AUTH: 8,
+      PRIVATE: 9
+    },
+    RETVAL = {
+      INFO: 1,
+      OK: 2,
+      WAITING: 3,
+      ERR_NONSYN: 4,
+      ERR_OTHER: 5
+    },
+    ERRORS = {
+      400: 'Service not available or no longer available',
+      401: 'Server is in the wrong mode',
+      403: 'Internal fault',
+      411: 'No such newsgroup',
+      412: 'No newsgroup selected',
+      420: 'Current article number is invalid',
+      421: 'No next article in this group',
+      422: 'No previous article in this group',
+      423: 'No article with that number or in that range',
+      430: 'No article with that message-id',
+      435: 'Article not wanted',
+      436: 'Transfer not possible or failed; try again later',
+      437: 'Transfer rejected; do not retry',
+      440: 'Posting not permitted',
+      441: 'Posting failed',
+      480: 'Authentication required',
+      481: 'Authentication failed/rejected', // RFC 4643
+      483: 'Command unavailable until suitable privacy has been arranged',
+      500: 'Unknown command',
+      501: 'Syntax error',
+      502: 'Service/command not permitted',
+      503: 'Feature not supported',
+      504: 'Invalid base64-encoded argument'
+    };
 
-var NNTP = module.exports = function(options) {
+var inspect = require('util').inspect;
+
+function NNTP() {
+  this._sbmhML = new SBMH(bytesMLTerm);
+  this._sbmhML.maxMatches = 1;
+  this._sbmhCRLF = new SBMH(bytesCRLF);
+  this._sbmhCRLF.maxMatches = 1;
+
   this._socket = undefined;
   this._state = undefined;
-  this._MLEmitter = undefined;
   this._caps = undefined;
-  this._buffer = false;
-  this._buffy = undefined;
-  this._curGroup = undefined;
+  this._queue = undefined;
   this._curReq = undefined;
-  this._queue = [];
+  this._stream = undefined;
+  this._buffer = undefined;
+  this._bufferEnc = undefined;
   this.options = {
-    host: 'localhost',
-    port: 119,
-    /*secure: false,*/
-    connTimeout: 60000, // in ms
-    debug: false
+    host: undefined,
+    port: undefined,
+    secure: undefined,
+    user: undefined,
+    password: undefined,
+    connTimeout: undefined,
+    debug: undefined
   };
-  extend(true, this.options, options);
-  if (typeof this.options.debug === 'function')
-    debug = this.options.debug;
+  this.connected = false;
 };
-util.inherits(NNTP, EventEmitter);
+inherits(NNTP, EventEmitter);
 
-NNTP.prototype.connect = function(port, host) {
-  var self = this, socket = this._socket, curData = '', curDataBin = [];
-  this.options.port = port = port || this.options.port;
-  this.options.host = host = host || this.options.host;
+NNTP.prototype.reset = function() {
+  this._sbmhML.reset();
+  this._sbmhCRLF.reset();
+  this._socket = undefined;
+  this._state = undefined;
+  this._caps = undefined;
+  this._queue = undefined;
+  this._curReq = undefined;
+  this._stream = undefined;
+  this._buffer = '';
+  this._bufferEnc = undefined;
+  this.connected = false;
+};
 
-  this._caps = new Object();
-  this._state = this._curGroup = this._caps = undefined;
+function readCode(chunk, code) {
+  var ret = code, more,
+      left = chunk.length - chunk.p;
+  if (left >= 3 && code === undefined) {
+    ret = parseInt(chunk.toString('ascii', chunk.p, chunk.p + 3), 10);
+    chunk.p += 3;
+  } else {
+    if (code === undefined) {
+      ret = chunk.toString('ascii', chunk.p);
+      chunk.p = chunk.length;
+    } else {
+      more = 3 - ret.length;
+      if (left >= more) {
+        ret += chunk.toString('ascii', chunk.p, chunk.p + more);
+        chunk.p += more;
+      } else {
+        ret += chunk.toString('ascii', chunk.p);
+        chunk.p = chunk.length;
+      }
+
+      if (ret.length === 3)
+        ret = parseInt(ret, 10);
+    }
+  }
+  return ret;
+}
+
+NNTP.prototype.connect = function(options) {
+  var self = this;
+
+  this.options.host = options.host || 'localhost';
+  this.options.port = options.port || 119;
+  this.options.secure = options.secure || false;
+  this.options.user = options.user || '';
+  this.options.password = options.password || '';
+  this.options.connTimeout = options.connTimeout || 60000; // in ms
+  this.options.debug = false;
+  if (typeof options.debug === 'function')
+    this.options.debug = options.debug;
+
+  this.reset();
+  this._caps = {};
   this._queue = [];
+  this._state = 'connecting';
+  this.connected = false;
 
-  if (socket)
-    socket.end();
+  var isML = false, code, type, retval, buffer = [], bufSize = 0, isErr, sbmh;
 
   var connTimeout = setTimeout(function() {
     self._socket.destroy();
     self._socket = undefined;
-    self.emit('timeout');
+    self.emit('error', new Error('Connection timeout'));
   }, this.options.connTimeout);
-  socket = this._socket = net.createConnection(port, host);
-  socket.setTimeout(0);
-  socket.on('connect', function() {
+
+  var socket = this._socket = new Socket();
+  this._socket.setTimeout(0);
+  if (this.options.secure)
+    socket = tls.connect({ socket: this._socket }, onconnect);
+  else
+    this._socket.once('connect', onconnect);
+  function onconnect() {
+    self._socket = socket; // re-assign for secure connections
+    self._state = 'connected';
+    self.connected = true;
     clearTimeout(connTimeout);
-    if (debug)
-      debug('Connected');
-  });
-  socket.on('end', function() {
-    if (debug)
-      debug('Disconnected');
+    
+    var cmd, params;
+    self._curReq = {
+      cmd: '',
+      cb: function reentry(err, code) {
+        // many? servers don't support the *mandatory* CAPABILITIES command :-(
+        if (err && cmd !== 'CAPABILITIES') {
+          self.emit('error', err);
+          return self._socket.end();
+        }
+        // TODO: try sending CAPABILITIES first thing
+        if (!cmd) {
+          if (self.options.user) {
+            cmd = 'AUTHINFO';
+            params = 'USER ' + self.options.user;
+          } else {
+            cmd = 'CAPABILITIES';
+            params = undefined;
+          }
+        } else if (cmd === 'AUTHINFO') {
+          if (params.substr(0, 4) === 'USER') {
+            if (code === 381) { // password required
+              if (!self.options.password) {
+                self.emit('error', makeError('Password required', code));
+                return self._socket.end();
+              }
+              params = 'PASS ' + self.options.password;
+            }
+          } else if (params.substr(0, 4) === 'PASS') {
+            cmd = 'CAPABILITIES';
+            params = undefined;
+          }
+        } else if (cmd === 'CAPABILITIES') {
+          //self._parseCaps();
+          return self.emit('ready');
+        }
+        self._send(cmd, params, reentry);
+      }
+    };
+  }
+  this._socket.once('end', function() {
+    clearTimeout(connTimeout);
+    self.connected = false;
+    self._state = 'disconnected';
     self.emit('end');
   });
-  socket.on('close', function(hasError) {
+  this._socket.once('close', function(had_err) {
     clearTimeout(connTimeout);
-    self.emit('close', hasError);
+    self.connected = false;
+    self._state = 'disconnected';
+    self.emit('close', had_err);
   });
-  socket.on('error', function(err) {
+  this._socket.once('error', function(err) {
     self.emit('error', err);
   });
-  var code = undefined, text, hasProcessed = false, isML = false, idxCRLF,
-      idxStart = 0, idxBStart = 0, idxBCRLF;
-  socket.on('data', function(data) {
-    if (self._buffer)
-      self._buffy.append(data);
-    curData += data;
-    while ((idxCRLF = curData.indexOf('\r\n', idxStart)) > -1
-           || (self._buffer &&
-               (idxBCRLF = self._buffy.indexOf(bytesCRLF, idxBStart)) > -1)) {
-      if (self._buffer) {
-        var r = self._buffy.GCBefore(idxBStart);
-        if (r > 0 && idxBStart > 0)
-          idxBStart -= r;
-        idxBCRLF = self._buffy.indexOf(bytesCRLF, idxBStart);
-      }
-      hasProcessed = true;
-      if (!code) {
-        // new response
-        code = parseInt(curData.substring(idxStart, 3), 10);
-        text = curData.substring(3, idxCRLF).trim();
-        if (isML = (respsML.indexOf(code) > -1
-                    || (code === 211 && self._queue[0][0] === 'LISTGROUP')))
-          self._MLEmitter = new EventEmitter();
-        if (debug) {
-          debug('Response: code = ' + code + ' (multiline: ' + isML + ')'
-                + (text ? '; text = ' + util.inspect(text) : ''));
-        }
-        if (respsHaveArgs.indexOf(code) > -1)
-          text = parseInitLine(code, text);
+  socket.on('data', function ondata(chunk) {
+    chunk.p = 0;
+    var chlen = chunk.length, r = 0;
 
-        if (!self._state) {
-          if (code === 200 || code === 201) {
-            self._state = 'connected';
-            code = undefined;
-            hasProcessed = false;
-            curData = '';
-            idxStart = 0;
-            if (!self._refreshCaps(function() { self.emit('connect'); })) {
-              self._state = undefined;
-              self.emit('error', new Error('Connection severed'));
-            }
-          } else
-            self.emit('error', makeError(code, text));
+    while (r < chlen) {
+      if (typeof code !== 'number') {
+        code = readCode(chunk, code);
+        if (typeof code !== 'number')
           return;
-        } else {
-          if (code >= 400 && code < 600)
-            self._callCb(makeError(code, text));
-          else {
-            // Non-errors/failures
-            if (code === 340) {
-              // generated by POST -- "go ahead and send me the article"
-              // thus, not really an "end response code"
-              var cur = self._queue[0];
-              if (cur)
-                (cur.length === 3 ? cur[2] : cur[1])();
-            } else {
-              if (respsHaveArgs.indexOf(code) > -1) {
-                if (isML)
-                  self._callCb(self._MLEmitter, text);
-                else
-                  self._callCb(text);
-              } else if (isML)
-                self._callCb(self._MLEmitter);
-              else if (code === 381) // asking for password
-                self._callCb(true);
-              else
-                self._callCb();
-              /*var group = getGroup(code); // second digit
-              if (group === 0) {
-                // Connection, setup, and miscellaneous messages
-              } else if (group === 1) {
-                // Newsgroup selection
-              } else if (group === 2) {
-                // Article selection
-              } else if (group === 3) {
-                // Distribution functions
-              } else if (group === 4) {
-                // Posting
-              } else if (group === 8) {
-                // Reserved for authentication and privacy extensions
-              } else if (group === 9) {
-                // Reserved for private use (non-standard extensions)
-              }*/
-            }
-          }
+        if (isNaN(code)) {
+          self.reset();
+          self.emit('error', new Error('Parse error'));
+          return socket.end();
         }
-        if (!isML && code !== 340) {
-          code = undefined;
-          self.send();
-        }
+        retval = code / 100 >> 0;
+        type = (code % 100) / 10 >> 0;
+        isErr = (retval === RETVAL.ERR_NONSYN || retval === RETVAL.ERR_OTHER);
+        if (code === 211)
+          isML = (self._curReq.cmd !== 'GROUP');
+        else
+          isML = (respsML.indexOf(code) > -1);
+        sbmh = (isML ? self._sbmhML : self._sbmhCRLF);
+        sbmh.reset();
+        bufSize = 0;
+        r = chunk.p;
       } else {
-        // continued response
-        if ((idxCRLF - idxStart === 1 && curData[idxStart] === '.')
-            || (self._buffer && idxBCRLF - idxBStart === 1 && self._buffy.get(0) === 46)) {
-          code = undefined;
-          self._setBinMode(false);
-          idxBStart = 0;
-          idxBCRLF = -1;
-          self._MLEmitter.emit('end');
-          process.nextTick(function() { self.send(); });
-        } else if (self._buffer) {
-          var size = (idxBCRLF - idxBStart);
-          if (size < 0)
-            size = 0;
-          if (size >= 2 && self._buffy.get(idxBStart) === 46) {
-            // for "dot-stuffed" lines
-            --size;
-            ++idxBStart;
+        r = sbmh.push(chunk, r);
+
+        if (sbmh.matches === 1) {
+          if (self._stream) {
+            if (isErr)
+              self._stream.emit('error', makeError(ERRORS[code], code));
+            else
+              self._stream.emit('end');
+            self._stream.emit('close', isErr);
+          } else if (isErr)
+            self._curReq.cb(makeError(ERRORS[code], code));
+          else if (self._buffer === undefined) {
+            var buf = Buffer.concat(buffer, bufSize);
+            buffer = [];
+            self._curReq.cb(undefined, code, retval, type, buf);
+          } else {
+            self._curReq.cb(undefined, code, retval, type);
+            self._buffer = '';
           }
-          var buf = new Buffer(size);
-          if (idxBCRLF > idxBStart)
-            self._buffy.copy(buf, 0, idxBStart, idxBCRLF);
-          self._MLEmitter.emit('line', buf);
-        } else
-          self._MLEmitter.emit('line', curData.substring(idxStart, idxCRLF));
-      }
-      if (idxCRLF > -1)
-        idxStart = idxCRLF + 2;
-      if (idxBCRLF > -1)
-        idxBStart = idxBCRLF + 2;
-    }
-    if (hasProcessed) {
-      if (idxStart >= curData.length)
-        curData = '';
-      else
-        curData = curData.substring(idxStart);
-      if (self._buffer) {
-        if (idxBStart >= self._buffy.length)
-          self._buffy = new Buffy();
-        else {
-          var buf = new Buffer(self._buffy.length - idxBStart);
-          self._buffy.copy(buf, 0, idxBStart);
-          self._buffy = new Buffy();
-          self._buffy.append(buf);
+          code = undefined;
+          self._curReq = undefined;
+          self._send();
         }
-        idxBStart = 0;
       }
-      idxStart = 0;
-      hasProcessed = false;
     }
   });
+
+  function responseHandler(chunk, start, end) {
+    if (isErr)
+      return;
+    if (self._stream === undefined) {
+      if (self._buffer === undefined) {
+        buffer.push(chunk.slice(start, end));
+        bufSize += (end - start);
+      } else
+        self._buffer += chunk.toString(self._bufferEnc || 'utf8', start, end);
+    } else
+      self._stream.emit('data', chunk.slice(start, end));
+  }
+  this._sbmhML.on('data', responseHandler);
+  this._sbmhCRLF.on('data', responseHandler);
+
+  this._socket.connect(this.options.port, this.options.host);
 };
 
 NNTP.prototype.end = function() {
-  if (this._socket)
+  if (this._socket && this._socket.writable)
     this._socket.end();
 
   this._socket = undefined;
 };
 
-/* Standard/Common features */
 
-NNTP.prototype.auth = function(user, password, callback) {
-  if (!this._state || this._state === 'authorized')
-    return false;
-
-  if (typeof user === 'function')
-    return false;
-  else if (typeof password === 'function') {
-    callback = password;
-    password = undefined;
-  }
-
+// Mandatory/Common features
+NNTP.prototype.dateTime = function(cb) {
   var self = this;
-  return this.send('AUTHINFO USER', user, function(e, needCont) {
-    if (e)
-      return callback(e);
-    if (needCont) {
-      if (!password)
-        return callback(new Error('Server requires a password'));
-      process.nextTick(function() {
-        var r = self.send('AUTHINFO PASS', password, function(e) {
-          if (!e)
-            self._state = 'authorized';
-          process.nextTick(function() { callback(e); });
-        });
-        if (!r)
-          return callback(new Error('Connection severed'));
-      });
-    } else {
-      self._state = 'authorized';
-      process.nextTick(function() { callback(); });
-    }
+  this._send('DATE', undefined, function(err, code, r, type) {
+    if (err)
+      return cb(err);
+    // server UTC date/time in YYYYMMDDHHMMSS format
+    cb(undefined, self._buffer.trim());
   });
 };
 
-NNTP.prototype.groups = function(search, skipEmpty, cb) {
-  if (!this._state)
-    return false;
+NNTP.prototype.stat = function(id, cb) {
+  var self = this;
+  if (typeof id === 'function') {
+    cb = id;
+    id = undefined;
+  }
+  this._send('STAT', id, function(err, code, r, type) {
+    if (err)
+      return cb(err);
+    var m = reStat.exec(self._buffer.trim());
+    // article number, message id
+    cb(undefined, parseInt(m[1], 10), m[2]);
+  });
+};
+
+NNTP.prototype.group = function(group, cb) {
+  var self = this;
+  this._send('GROUP', group, function(err, code, r, type) {
+    if (err)
+      return cb(err);
+    // est. article count, low mark, high mark
+    var m = reGroup.exec(self._buffer.trim());
+    cb(undefined, parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10));
+  });
+};
+
+NNTP.prototype.next = function(cb) {
+  var self = this;
+  this._send('NEXT', undefined, function(err, code, r, type) {
+    if (err)
+      return cb(err);
+    var m = reStat.exec(self._buffer.trim());
+    // article number, message id
+    cb(undefined, parseInt(m[1], 10), m[2]);
+  });
+};
+
+NNTP.prototype.prev = function(cb) {
+  var self = this;
+  this._send('LAST', undefined, function(err, code, r, type) {
+    if (err)
+      return cb(err);
+    var m = reStat.exec(self._buffer.trim());
+    // article number, message id
+    cb(undefined, parseInt(m[1], 10), m[2]);
+  });
+};
+
+NNTP.prototype.headers = function(what, cb) {
+  var self = this;
+
+  if (typeof what === 'function') {
+    cb = what;
+    what = undefined;
+  }
+
+  this._send('HEAD', what, function(err, code, r, type) {
+    if (err)
+      return cb(err);
+
+    var list = self._buffer.split(reCRLF),
+        info = list.shift().trim(),
+        headers = {}, m;
+
+    for (var i = 0, h, len = list.length; i < len; ++i) {
+      if (list[i].length === 0)
+        continue;
+      if (list[i][0] === '\t' || list[i][0] === ' ') {
+        // folded header content
+        m = reHdrFold.exec(list[i]);
+        if (Array.isArray(headers[h]))
+          headers[h][headers[h].length - 1] += m[1];
+        else
+          headers[h] += m[1];
+      } else {
+        m = reHdr.exec(list[i]);
+        h = m[1].toLowerCase();
+        if (m[2]) {
+          if (headers[h] === undefined)
+            headers[h] = m[2];
+          else if (!Array.isArray(headers[h]))
+            headers[h] = [headers[h], m[2]];
+          else
+            headers[h].push(m[2]);
+        } else
+          headers[h] = '';
+      }
+    }
+
+    m = reStat.exec(info);
+    // article number, message id, headers
+    cb(undefined, parseInt(m[1], 10), m[2], headers);
+  });
+};
+
+NNTP.prototype.body = function(what, cb) {
+  var self = this;
+
+  /*if (typeof what === 'function') {
+    // body(function() {})
+    cb = what;
+    doBuffer = false;
+    what = undefined;
+  } else if (typeof doBuffer === 'function') {
+    cb = doBuffer;
+    if (typeof what === 'boolean') {
+      // body(true, function() {});
+      doBuffer = what;
+      what = undefined;
+    } else {
+      // body(100, function() {});
+      doBuffer = false;
+    }
+  }*/
+
+  if (typeof what === 'function') {
+    cb = what;
+    what = undefined;
+  }
+
+  this._bufferEnc = 'binary';
+
+  this._send('BODY', what, function(err, code, r, type) {
+    self._bufferEnc = undefined;
+    if (err)
+      return cb(err);
+
+    var idxCRLF = self._buffer.indexOf('\r\n'), m, body = '';
+
+    if (idxCRLF > -1) {
+      body = self._buffer.substring(idxCRLF + 2);
+      m = reStat.exec(self._buffer.substring(0, idxCRLF).trim());
+    } else {
+      // empty body
+      m = reStat.exec(self._buffer.trim());
+    }
+
+    // article number, message id, string body
+    cb(undefined, parseInt(m[1], 10), m[2], body);
+  });
+};
+
+NNTP.prototype.article = function(what, cb) {
+  var self = this;
+
+  /*if (typeof what === 'function') {
+    // body(function() {})
+    cb = what;
+    doBuffer = false;
+    what = undefined;
+  } else if (typeof doBuffer === 'function') {
+    cb = doBuffer;
+    if (typeof what === 'boolean') {
+      // body(true, function() {});
+      doBuffer = what;
+      what = undefined;
+    } else {
+      // body(100, function() {});
+      doBuffer = false;
+    }
+  }*/
+
+  if (typeof what === 'function') {
+    cb = what;
+    what = undefined;
+  }
+
+  this._bufferEnc = 'binary';
+
+  this._send('ARTICLE', what, function(err, code, r, type) {
+    self._bufferEnc = undefined;
+    if (err)
+      return cb(err);
+
+    var idxDCRLF = self._buffer.indexOf('\r\n\r\n'), m, list,
+        headers = {}, body, info, sheaders;
+
+    sheaders = self._buffer.substring(0, idxDCRLF);
+    list = sheaders.split(reCRLF);
+    info = list.shift().trim();
+    for (var i = 0, h, len = list.length; i < len; ++i) {
+      if (list[i].length === 0)
+        continue;
+      if (list[i][0] === '\t' || list[i][0] === ' ') {
+        // folded header content
+        m = reHdrFold.exec(list[i]);
+        if (Array.isArray(headers[h]))
+          headers[h][headers[h].length - 1] += m[1];
+        else
+          headers[h] += m[1];
+      } else {
+        m = reHdr.exec(list[i]);
+        h = m[1].toLowerCase();
+        if (m[2]) {
+          if (headers[h] === undefined)
+            headers[h] = m[2];
+          else if (!Array.isArray(headers[h]))
+            headers[h] = [headers[h], m[2]];
+          else
+            headers[h].push(m[2]);
+        } else
+          headers[h] = '';
+      }
+    }
+
+    body = self._buffer.substring(idxDCRLF + 4);
+
+    m = reStat.exec(info);
+
+    // article number, message id, headers, string body
+    cb(undefined, parseInt(m[1], 10), m[2], headers, body);
+  });
+};
+
+
+// Extended features -- these may not be implemented or enabled on all servers
+NNTP.prototype.newNews = function(search, date8, time6, cb) {
+  if (typeof search !== 'string')
+    throw new Error('Expected search string');
+  /*if (typeof date8 === 'function'
+      || (typeof time6 === 'function' && !util.isDate(date8)))
+    throw new Error('Expected Date instance');*/
+
+  var self = this;
+
+  if (typeof time6 === 'function') {
+    cb = time6;
+    if (util.isDate(date8)) {
+      time6 = padLeft(''+date8.getUTCHours(), 2, '0')
+              + padLeft(''+date8.getUTCMinutes(), 2, '0')
+              + padLeft(''+date8.getUTCSeconds(), 2, '0');
+      date8 = ''+date8.getUTCFullYear()
+              + padLeft(''+date8.getUTCMonth(), 2, '0')
+              + padLeft(''+date8.getUTCDate(), 2, '0');
+    } else
+      time6 = '000000';
+  }
+
+  if (Array.isArray(search))
+    search = search.join(',');
+  search = (search ? search : '');
+
+  this._send('NEWNEWS', search + ' ' + date8 + ' ' + time6 + ' GMT',
+    function(err, code, r, type) {
+      if (err)
+        return cb(err);
+      var list = self._buffer.split(reCRLF);
+      list.shift(); // remove initial response line
+      cb(undefined, list);
+    }
+  );
+};
+
+NNTP.prototype.groups = function(search, cb) {
+  var self = this;
   if (typeof search === 'function') {
     cb = search;
     search = '';
-    skipEmpty = true;
-  } else if (typeof skipEmpty === 'function') {
-    cb = skipEmpty;
-    skipEmpty = true;
   }
   if (Array.isArray(search))
     search = search.join(',');
-  search = (search ? ' ' + search : '');
-  var self = this;
-  return this.send('LIST', 'ACTIVE' + search, function(e, mle) {
-    if (e)
-      return cb(e);
-    var emitter = new EventEmitter();
-    mle.on('line', function(line) {
-      line = line.split(' ');
-      var name = line[0],
-          first = parseInt(line[1], 10),
-          second = parseInt(line[2], 10),
-          status = line[3],
-          msgCount = (first - second) + 1;
-      if (first === 10000000000000000 || second === 10000000000000000)
-        msgCount += 1;
-      if (!skipEmpty || msgCount > 0)
-        emitter.emit('group', name, msgCount, status);
-    });
-    mle.on('end', function() {
-      emitter.emit('end');
-    });
-    cb(undefined, emitter);
+  search = (search ? search : '');
+  this._send('LIST', 'ACTIVE' + search, function(err, code, r, type) {
+    if (err)
+      return cb(err);
+    var list = self._buffer.split(reCRLF);
+    list.shift(); // remove initial response line
+    for (var i = 0, m, len = list.length; i < len; ++i) {
+      m = reListActive.exec(list[i]);
+      // short name, low mark, high mark, status
+      list[i] = [ m[1], parseInt(m[3], 10), parseInt(m[2], 10), m[4] ];
+    }
+    cb(undefined, list);
   });
 };
 
-NNTP.prototype.groupsDescr = function(search, cb) {
-  if (!this._state)
-    return false;
+NNTP.prototype.groupsDesc = function(search, cb) {
+  var self = this;
   if (typeof search === 'function') {
     cb = search;
     search = '';
   } else if (Array.isArray(search))
     search = search.join(',');
-  search = (search ? ' ' + search : '');
-  var self = this, reMatch = /^(.+?)\s+(.+)$/;
-  return this.send('LIST', 'NEWSGROUPS' + search, function(e, mle) {
-    if (e)
-      return cb(e);
-    var emitter = new EventEmitter();
-    mle.on('line', function(line) {
-      line = line.match(reMatch);
-      emitter.emit('description', line[1], line[2]);
-    });
-    mle.on('end', function() {
-      emitter.emit('end');
-    });
-    cb(undefined, emitter);
+  search = (search ? search : '');
+
+  // According to the RFC:
+  //   The description SHOULD be in UTF-8. However, servers often obtain the
+  //   information from external sources. These sources may have used different
+  //   encodings (ones that use octets in the range 128 to 255 in some other
+  //   manner) and, in that case, the server MAY pass it on unchanged.
+  //   Therefore, clients MUST be prepared to receive such descriptions.
+  this._bufferEnc = 'binary';
+
+  this._send('LIST', 'NEWSGROUPS' + search, function(err, code, r, type) {
+    self._bufferEnc = undefined;
+    if (err)
+      return cb(err);
+    var list = self._buffer.split(reCRLF);
+    list.shift(); // remove initial response line
+    for (var i = 0, m, len = list.length; i < len; ++i) {
+      m = reGroupDesc.exec(list[i]);
+      // short name, description
+      list[i] = [ m[1], m[2] ];
+    }
+    cb(undefined, list);
   });
-};
-
-// server's UTC date and time
-NNTP.prototype.dateTime = function(cb) {
-  if (!this._state)
-    return false;
-  return this.send('DATE', cb);
-};
-
-NNTP.prototype.articlesSince = function(search, date8, time6, cb) {
-  if (!this._state || typeof search !== 'string' || typeof date8 === 'function'
-      || (typeof time6 === 'function' && !(date8 instanceof Date)))
-    return false;
-  if (typeof time6 === 'function') {
-    cb = time6;
-    time6 = padLeft(''+date8.getUTCHours(),2,'0')
-            + padLeft(''+date8.getUTCMinutes(),2,'0')
-            + padLeft(''+date8.getUTCSeconds(),2,'0');
-    date8 = ''+date8.getUTCFullYear()
-            + padLeft(''+date8.getUTCMonth(),2,'0')
-            + padLeft(''+date8.getUTCDate(),2,'0');
-  }
-  if (Array.isArray(search))
-    search = search.join(',');
-  search = (search ? ' ' + search : '');
-  var self = this;
-  return this.send('NEWNEWS', search + ' ' + date8 + ' ' + time6
-                              + ' GMT', function(e, mle) {
-    if (e)
-      return cb(e);
-    var emitter = new EventEmitter();
-    mle.on('line', function(line) {
-      emitter.emit('messageID', line);
-    });
-    mle.on('end', function() {
-      emitter.emit('end');
-    });
-    cb(undefined, emitter);
-  });
-};
-
-NNTP.prototype.articleExists = function(id, cb) {
-  if (!this._state || typeof id === 'function')
-    return false;
-  return this.send('STAT', id, function(e) {
-    if (e) {
-      if (e.code === 430)
-        cb(undefined, false);
-      else
-        cb(e);
-    } else
-      cb(undefined, true);
-  });
-};
-
-NNTP.prototype.group = function(group, cb) {
-  if (!this._state || typeof group !== 'string')
-    return false;
-  var self = this;
-  return this.send('GROUP', group, function(e, text) {
-    if (!e)
-      self._curGroup = group;
-    cb(e, text);
-  });
-};
-
-NNTP.prototype.articleNext = function(cb) {
-  if (!this._state || !this._curGroup)
-    return false;
-  return this.send('NEXT', cb);
-};
-
-NNTP.prototype.articlePrev = function(cb) {
-  if (!this._state || !this._curGroup)
-    return false;
-  return this.send('LAST', cb);
 };
 
 NNTP.prototype.post = function(msg, cb) {
-  if (!this._state || !msg || Object.keys(msg).length)
-    return false;
-
   var self = this, composing = true;
-  return this.send('POST', function(e) {
-    if (e || !composing)
-      return cb(e);
-    composing = false;
+  this._send('POST', function reentry(err, code, r, type) {
+    if (err || !composing)
+      return cb(err);
+
     var CRLF = '\r\n',
-        text = 'From: "' + msg.from.name + '" <' + msg.from.email + '>' + CRLF
-             + 'Newsgroups: ' + (Array.isArray(msg.groups) ? msg.groups.join(',') : msg.groups) + CRLF
-             + 'Subject: ' + msg.subject + CRLF
-             + CRLF
-             + msg.body.replace(/\r\n/g, '\n')
-                       .replace(/\r/g, '\n')
-                       .replace(/\n/g, '\r\n')
-                       .replace(/^\.([^.]*?)/gm, '..$1');
-    self._socket.write(text + '\r\n.\r\n');
+        text;
+
+    text = 'From: "';
+    text += msg.from.name;
+    text += '" <';
+    text += msg.from.email;
+    text += '>';
+    text += CRLF;
+
+    text += 'Newsgroups: ';
+    text += (Array.isArray(msg.groups) ? msg.groups.join(',') : msg.groups);
+    text += CRLF;
+
+    text += 'Subject: ';
+    text += msg.subject;
+    text += CRLF;
+
+    text += CRLF;
+
+    text += (Buffer.isBuffer(msg.body)
+             ? msg.body.toString('utf8')
+             : msg.body
+            ).replace(/\r\n/g, '\n')
+             .replace(/\r/g, '\n')
+             .replace(/\n/g, '\r\n')
+             .replace(/^\.([^.]*?)/gm, '..$1');
+
+    // _send always appends CRLF to the end of every cmd
+    text += '\r\n.';
+
+    composing = false;
+    self._send(text, undefined, reentry);
   });
 };
 
-NNTP.prototype.headers = function(who, cb) {
-  if (!this._state || (!this._curGroup && typeof who === 'function'))
-    return false;
-  if (typeof who === 'function') {
-    cb = who;
-    who = undefined;
-  }
-  var self = this;
-  return this.send('HEAD', who, function(e, mle, msgid) {
-    if (e)
-      return cb(e);
-    var emitter = new EventEmitter(), prevField, prevVal;
-    mle.on('line', function(line) {
-      if (/^\s+/.test(line))
-        prevVal += line;
-      else {
-        if (prevField)
-          emitter.emit('header', prevField, prevVal);
-        var idxSep = line.indexOf(": ");
-        prevField = line.substring(0, idxSep);
-        prevVal = line.substring(idxSep+2);
-      }
-    });
-    mle.on('end', function() {
-      emitter.emit('header', prevField, prevVal);
-      emitter.emit('end');
-    });
-    cb(undefined, emitter, msgid);
-  });
-};
-
-NNTP.prototype.body = function(who, cb) {
-  if (!this._state || (!this._curGroup && typeof who === 'function'))
-    return false;
-  if (typeof who === 'function') {
-    cb = who;
-    who = undefined;
-  }
-  var self = this;
-  this._setBinMode(true);
-  return this.send('BODY', who, function(e, mle, msgid) {
-    if (e)
-      return cb(e);
-    var emitter = new EventEmitter();
-    mle.on('line', function(line) {
-      emitter.emit('line', line);
-    });
-    mle.on('end', function() {
-      emitter.emit('end');
-    });
-    cb(undefined, emitter, msgid);
-  });
-};
-
-NNTP.prototype.article = function(who, cb) {
-  if (!this._state || (!this._curGroup && typeof who === 'function'))
-    return false;
-  if (typeof who === 'function') {
-    cb = who;
-    who = undefined;
-  }
-  var self = this;
-  this._setBinMode(true);
-  return this.send('ARTICLE', who, function(e, mle, msgid) {
-    if (e)
-      return cb(e);
-    var emitter = new EventEmitter(), prevField, prevVal, inHeaders = true;
-    mle.on('line', function(line) {
-      if (inHeaders) {
-        line = ''+line;
-        if (/^[\t ]/.test(line))
-          prevVal += line;
-        else if (line.length) {
-          if (prevField)
-            emitter.emit('header', prevField, prevVal);
-          var idxSep = line.indexOf(": ");
-          prevField = line.substring(0, idxSep);
-          prevVal = line.substring(idxSep+2);
-        } else {
-          emitter.emit('header', prevField, prevVal);
-          inHeaders = false;
-        }
-      } else
-        emitter.emit('line', line);
-    });
-    mle.on('end', function() {
-      emitter.emit('end');
-    });
-    cb(undefined, emitter, msgid);
-  });
-};
-
-
-/* Extended features */
-
-// TODO
-
-
-/* Internal helper methods */
-
-NNTP.prototype.send = function(cmd, params, cb) {
-  if (!this._socket || !this._socket.writable)
-    return false;
-
-  if (cmd) {
-    cmd = (''+cmd).toUpperCase();
-    if (typeof params === 'function') {
-      cb = params;
-      params = undefined;
-    }
-    if (!params)
-      this._queue.push([cmd, cb]);
-    else
-      this._queue.push([cmd, params, cb]);
-  }
-  if (this._queue.length) {
+// Private methods
+NNTP.prototype._send = function(cmd, params, cb, raw) {
+  if (cmd !== undefined)
+    this._queue.push({ cmd: cmd, params: params, cb: cb });
+  if (!this._curReq && this._queue.length) {
     this._curReq = this._queue.shift();
-    var fullcmd = this._curReq[0]
-                  + (this._curReq.length === 3 ? ' ' + this._curReq[1] : '');
-    if (debug)
-      debug('> ' + fullcmd);
-    this._socket.write(fullcmd + '\r\n');
-  }
-
-  return true;
-};
-
-NNTP.prototype._setBinMode = function(isBinary) {
-  if (isBinary) {
-    this._buffy = new Buffy();
-    this._buffer = true;
-  } else {
-    this._buffer = false;
-    this._buffy = undefined;
-  }
-};
-
-NNTP.prototype._refreshCaps = function(cb) {
-  var self = this;
-  return this.send('CAPABILITIES', function (e, text) {
-    if (!e && /\r\n\.\r\n$/.test(text)) {
-      self._caps = new Object();
-      var caps = text.split(/\r\n/);
-      if (caps.length > 3) {
-        caps.shift(); // initial response
-        caps.pop(); // '.'
-        caps.pop(); // ''
-        for (var i=0,sp,len=caps.length; i<len; ++i) {
-          caps[i] = caps[i].trim();
-          if ((sp = caps[i].indexOf(' ')) > -1)
-            self._caps[caps[i].substring(0, sp).toUpperCase()] = caps[i].substring(sp+1);
-          else
-            self._caps[caps[i].toUpperCase()] = true;
-        }
-      }
-      if (debug)
-        debug('Capabilities Updated: ' + util.inspect(self._caps));
+    this._socket.write(this._curReq.cmd);
+    if (this._curReq.params !== undefined) {
+      this._socket.write(' ');
+      this._socket.write(''+this._curReq.params);
     }
-    process.nextTick(function() { cb(); });
-  });
+    this._socket.write(bytesCRLF);
+  }
 };
 
-NNTP.prototype._callCb = function(arg1, arg2) {
-  if (!this._curReq)
-    return;
-  var req = this._curReq, cb = (req.length === 3 ? req[2] : req[1]);
-  this._curReq = undefined;
-
-  if (!cb)
-    return;
-  else if (arg1 instanceof Error)
-    cb(arg1);
-  else if (typeof arg1 !== 'undefined' && arg2 !== 'undefined')
-    cb(undefined, arg1, arg2);
-  else if (typeof arg1 !== 'undefined')
-    cb(undefined, arg1);
-  else
-    cb();
+NNTP.prototype._parseCaps = function() {
+  // TODO
 };
 
+module.exports = NNTP;
 
-/******************************************************************************/
-/***************************** Utility functions ******************************/
-/******************************************************************************/
 function padLeft(str, size, pad) {
   var ret = str;
   if (str.length < size) {
@@ -610,187 +694,73 @@ function padLeft(str, size, pad) {
   }
   return ret;
 }
-function parseInitLine(code, text) {
-  var ret;
-  if (code === 111) {
-    // a date: yyyymmddhhmmss (24 hour UTC)
-    ret = new Object();
-    ret.year = parseInt(text.substring(0, 4), 10);
-    ret.month = parseInt(text.substring(4, 6), 10);
-    ret.date = parseInt(text.substring(6, 8), 10);
-    ret.hour = parseInt(text.substring(8, 10), 10);
-    ret.minute = parseInt(text.substring(10, 12), 10);
-    ret.second = parseInt(text.substring(12, 14), 10);
-  } else if (code === 211) {
-    text = text.split(' ');
-    ret = new Object();
-    ret.name = text[3];
-    text[0] = parseInt(text[0], 10); // estimated count
-    text[1] = parseInt(text[1], 10); // low article num
-    text[2] = parseInt(text[2], 10); // high article num
-    // empty group checks as per RFC3977
-    if (text[0] === 0 && ((text[1] === 0 && text[2] === 0) || (text[1] <= text[2])
-                          || (text[2] === text[1]-1)))
-      ret.count = 0;
-    else
-      ret.count = text[0];
-  } else if (code >= 220 && code <= 223) {
-    // just return the message-id
-    var idxSP = text.indexOf(' ');
-    ret = text.substring(idxSP+1);
-  } else if (code === 401)
-    ret = text;
-  return ret;
-}
 
-function makeError(code, text) {
-  var err = new Error('Server Error: ' + code + (text ? ' ' + text : ''));
+function makeError(msg, code) {
+  var err = new Error(msg);
   err.code = code;
-  err.text = text;
   return err;
 }
 
-function getGroup(code) {
-  return parseInt(code/10)%10;
-}
-
-/**
- * Adopted from jquery's extend method. Under the terms of MIT License.
- *
- * http://code.jquery.com/jquery-1.4.2.js
- *
- * Modified by Brian White to use Array.isArray instead of the custom isArray method
- */
-function extend() {
-  // copy reference to target object
-  var target = arguments[0] || {}, i = 1, length = arguments.length, deep = false, options, name, src, copy;
-  // Handle a deep copy situation
-  if (typeof target === "boolean") {
-    deep = target;
-    target = arguments[1] || {};
-    // skip the boolean and the target
-    i = 2;
-  }
-  // Handle case when target is a string or something (possible in deep copy)
-  if (typeof target !== "object" && !typeof target === 'function')
-    target = {};
-  var isPlainObject = function(obj) {
-    // Must be an Object.
-    // Because of IE, we also have to check the presence of the constructor property.
-    // Make sure that DOM nodes and window objects don't pass through, as well
-    if (!obj || toString.call(obj) !== "[object Object]" || obj.nodeType || obj.setInterval)
-      return false;
-    var has_own_constructor = hasOwnProperty.call(obj, "constructor");
-    var has_is_property_of_method = hasOwnProperty.call(obj.constructor.prototype, "isPrototypeOf");
-    // Not own constructor property must be Object
-    if (obj.constructor && !has_own_constructor && !has_is_property_of_method)
-      return false;
-    // Own properties are enumerated firstly, so to speed up,
-    // if last one is own, then all properties are own.
-    var last_key;
-    for (key in obj)
-      last_key = key;
-    return typeof last_key === "undefined" || hasOwnProperty.call(obj, last_key);
-  };
-  for (; i < length; i++) {
-    // Only deal with non-null/undefined values
-    if ((options = arguments[i]) !== null) {
-      // Extend the base object
-      for (name in options) {
-        src = target[name];
-        copy = options[name];
-        // Prevent never-ending loop
-        if (target === copy)
-            continue;
-        // Recurse if we're merging object literal values or arrays
-        if (deep && copy && (isPlainObject(copy) || Array.isArray(copy))) {
-          var clone = src && (isPlainObject(src) || Array.isArray(src)) ? src : Array.isArray(copy) ? [] : {};
-          // Never move original objects, clone them
-          target[name] = extend(deep, clone, copy);
-        // Don't bring in undefined values
-        } else if (typeof copy !== "undefined")
-          target[name] = copy;
-      }
-    }
-  }
-  // Return the modified object
-  return target;
-}
-
-Buffer.prototype.indexOf = function(subject, start) {
-  var search = (Array.isArray(subject) ? subject : [subject]),
-      searchLen = search.length,
-      ret = -1, i, j, len;
-  for (i=start||0,len=this.length; i<len; ++i) {
-    if (this[i] == search[0] && (len-i) >= searchLen) {
-      if (searchLen > 1) {
-        for (j=1; j<searchLen; ++j) {
-          if (this[i+j] != search[j])
-            break;
-          else if (j == searchLen-1) {
-            ret = i;
-            break;
-          }
-        }
-      } else
-        ret = i;
-      if (ret > -1)
-        break;
-    }
-  }
-  return ret;
-};
-
-
-// Target API:
-//
-//  var s = require('net').createStream(25, 'smtp.example.com');
-//  s.on('connect', function() {
-//   require('starttls')(s, options, function() {
-//      if (!s.authorized) {
-//        s.destroy();
-//        return;
-//      }
-//
-//      s.end("hello world\n");
-//    });
-//  });
-function starttls(socket, options, cb) {
-  var sslcontext = require('crypto').createCredentials(options),
-      pair = require('tls').createSecurePair(sslcontext, false),
-      cleartext = _pipe(pair, socket);
-  pair.on('secure', function() {
-    var verifyError = pair._ssl.verifyError();
-    if (verifyError) {
-      cleartext.authorized = false;
-      cleartext.authorizationError = verifyError;
-    } else
-      cleartext.authorized = true;
-    if (cb)
-      cb();
+function ReadStream(sock) {
+  var self = this;
+  this.readable = true;
+  this.paused = false;
+  this._buffer = [];
+  this._sock = sock;
+  this._decoder = undefined;
+  sock.once('end', function() {
+    self.readable = false;
   });
-  cleartext._controlReleased = true;
-  return cleartext;
-};
-function _pipe(pair, socket) {
-  pair.encrypted.pipe(socket);
-  socket.pipe(pair.encrypted);
-
-  pair.fd = socket.fd;
-  var cleartext = pair.cleartext;
-  cleartext.socket = socket;
-  cleartext.encrypted = pair.encrypted;
-  cleartext.authorized = false;
-
-  function onerror(e) {
-    if (cleartext._controlReleased)
-      cleartext.emit('error', e);
-  }
-  function onclose() {
-    socket.removeListener('error', onerror);
-    socket.removeListener('close', onclose);
-  }
-  socket.on('error', onerror);
-  socket.on('close', onclose);
-  return cleartext;
+  sock.once('close', function(had_err) {
+    self.readable = false;
+  });
 }
+inherits(ReadStream, Stream);
+
+ReadStream.prototype._emitData = function(d) {
+  if (d === undefined) {
+    if (this._buffer && this._buffer.length) {
+      this._emitData(this._buffer.shift());
+      return true;
+    } else
+      return false;
+  } else if (this.paused)
+    this._buffer.push(d);
+  else if (this._decoder) {
+    var string = this._decoder.write(d);
+    if (string.length)
+      this.emit('data', string);
+  } else
+    this.emit('data', d);
+};
+
+ReadStream.prototype.pause = function() {
+  this.paused = true;
+  this._sock.pause();
+};
+
+ReadStream.prototype.resume = function() {
+  if (this._buffer && this._buffer.length)
+    while (this._emitData());
+  this.paused = false;
+  this._sock.resume();
+};
+
+ReadStream.prototype.destroy = function(cb) {
+  this._decoder = undefined;
+
+  if (!this.readable) {
+    cb && process.nextTick(cb);
+    return;
+  }
+
+  this.readable = false;
+  this._buffer = [];
+  cb && cb();
+  this.emit('close');
+};
+
+ReadStream.prototype.setEncoding = function(encoding) {
+  var StringDecoder = require('string_decoder').StringDecoder; // lazy load
+  this._decoder = new StringDecoder(encoding);
+};

@@ -1,10 +1,13 @@
 { "name": "nntp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": "Brian White <mscdex@mscdex.net>",
   "description": "An NNTP client module for node.js",
   "main": "./nntp",
-  "engines": { "node" : ">=0.4.0" },
-  "keywords": [ "nntp", "client", "usenet", "newsreader", "newsgroups", "newsgroup", "news" ],
+  "dependencies": {
+    "streamsearch": "*"
+  },
+  "engines": { "node" : ">=0.8.0" },
+  "keywords": [ "nntp", "client", "usenet", "newsreader", "newsgroups", "news" ],
   "licenses": [ { "type": "MIT", "url": "http://github.com/mscdex/node-nntp/raw/master/LICENSE" } ],
   "repository" : { "type": "git", "url": "http://github.com/mscdex/node-nntp.git" }
 }

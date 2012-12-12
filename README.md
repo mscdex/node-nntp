@@ -1,209 +1,195 @@
 Description
 ===========
 
-node-nntp is an NNTP (usenet/newsgroups/etc) client module for [node.js](http://nodejs.org/).
+node-nntp is an NNTP (usenet/newsgroups) client module for [node.js](http://nodejs.org/).
 
 
 Requirements
 ============
 
-* [node.js](http://nodejs.org/) -- v0.4.0 or newer
+* [node.js](http://nodejs.org/) -- v0.8.0 or newer
 
 
 Examples
 ========
 
-### Setup/Initialization code
+* Get the headers and body of the first message in 'misc.test'
 
-    var NNTPClient = require('./nntp'), inspect = require('util').inspect, conn;
+```javascript
+    var NNTP = require('nntp'),
+        inspect = require('util').inspect;
 
-    // Be lazy and always exit the process on any error
-    function die(e) {
-      console.error(e);
-      process.exit(1);
-    }
-
-    conn = new NNTPClient({
-      host: 'news.example.com'
-    });
-    conn.on('connect', function() {
-      conn.auth('foo', 'bar', function(e) {
-        if (e) die(e);
-        doActions();
+    var c = new NNTP();
+    c.on('ready', function() {
+      c.group('misc.test', function(err, count, low, high) {
+        if (err) throw err;
+      });
+      c.article(function(err, n, id, headers, body) {
+        if (err) throw err;
+        console.log('Article #' + n);
+        console.log('Article ID: ' + id);
+        console.log('Article headers: ' + inspect(headers));
+        console.log('Article body: ' + inspect(body));
       });
     });
-    conn.on('error', function(err) {
-      console.error('Error: ' + inspect(err));
+    c.on('error', function(err) {
+      console.log('Error: ' + err);
     });
-    conn.connect();
+    c.on('close', function(had_err) {
+      console.log('Connection closed');
+    });
+    c.connect({
+      host: 'example.org',
+      user: 'foo',
+      password: 'bar'
+    });
+```
 
-* Get a list of all non-empty newsgroups beginning with "alt.binaries.":
+* Get a list of all newsgroups beginning with 'alt.binaries.'
 
-        function doActions() {
-          conn.groups('alt.binaries.*', true, function(e, em) {
-            if (e) die(e);
-            em.on('group', function(name, count, status) {
-              console.log(name + ': ' + count + ' articles');
-            });
-            em.on('end', function() {
-              console.log('Done fetching groups!');
-              conn.end();
-            });
-          });
-        };
+```javascript
+    var NNTP = require('nntp'),
+        inspect = require('util').inspect;
 
-* Download the body of a specific message and save it to disk:
-
-        function doActions() {
-          conn.body('<some.message.id@baz>', function(e, em) {
-            if (e) die(e);
-            var file = require('fs').createWriteStream('body.dat');
-            em.on('line', function(line) {
-              file.write(line);
-              file.write('\r\n');
-            });
-            em.on('end', function() {
-              file.end();
-              conn.end();
-            });
-          });
-        };
+    var c = new NNTP();
+    c.on('ready', function() {
+      c.groups('alt.binaries.*', function(err, list) {
+        if (err) throw err;
+        console.dir(list);
+      });
+    });
+    c.on('error', function(err) {
+      console.log('Error: ' + err);
+    });
+    c.on('close', function(had_err) {
+      console.log('Connection closed');
+    });
+    c.connect({
+      host: 'example.org',
+      user: 'foo',
+      password: 'bar'
+    });
+```
 
 * Post a message to alt.test:
 
-        function doActions() {
-          var msg = {
-            from: { name: 'Node User', email: 'user@example.com' },
-            groups: 'alt.test',
-            subject: 'Just testing, do not mind me',
-            body: 'node.js rules!'
-          };
-          conn.post(msg, function(e) {
-            if (e) die(e);
-            console.log('Message posted successfully!');
-            conn.end();
-          });
-        };
+```javascript
+    var NNTP = require('nntp'),
+        inspect = require('util').inspect;
 
-* Get the descriptions of alt.binaries.freeware and news.test:
-
-        function doActions() {
-          var groups = ['alt.binaries.freeware', 'news.test'];
-          conn.groupsDescr(groups, function(e, em) {
-            if (e) die(e);
-            em.on('description', function(name, description) {
-              console.log(name + ': ' + description);
-            });
-            em.on('end', function() {
-              console.log('End of descriptions');
-              conn.end();
-            });
-          });
-        };
+    var c = new NNTP();
+    c.on('ready', function() {
+      var msg = {
+        from: { name: 'Node User', email: 'user@example.com' },
+        groups: 'alt.test',
+        subject: 'Just testing, do not mind me',
+        body: 'node.js rules!'
+      };
+      c.post(msg, function(err) {
+        if (err) throw err;
+      });
+    });
+    c.on('error', function(err) {
+      console.log('Error: ' + err);
+    });
+    c.on('close', function(had_err) {
+      console.log('Connection closed');
+    });
+    c.connect({
+      host: 'example.org',
+      user: 'foo',
+      password: 'bar'
+    });
+```
 
 
 API
 ===
 
-_Events_
---------
+Events
+------
 
-* **connect**() - Fires when a connection to the server has been successfully established.
+* **ready**() - Emitted when connection and authentication was successful.
 
-* **timeout**() - Fires when a connection to the server was not made within the configured amount of time.
+* **close**(< _boolean_ >hadErr) - Emitted when the connection has fully closed.
 
-* **close**(Boolean:hasError) - Fires when the connection is completely closed (similar to net.Socket's close event). The specified Boolean indicates whether the connection was terminated due to a transmission error or not.
+* **end**() - Emitted when the connection has ended.
 
-* **end**() - Fires when the connection has ended.
-
-* **error**(Error:err) - Fires when an exception/error occurs (similar to net.Socket's error event). The given Error object represents the error raised.
+* **error**(< _Error_ >err) - Emitted when an error occurs. In case of protocol-level errors, `err` contains a 'code' property that references the related NNTP response code.
 
 
-_Methods_
----------
+Methods
+-------
 
-**\* Note 1: If a particular action results in an NNTP-specific error, the error object supplied to the callback or 'error' event will contain 'code' and 'text' properties that contain the relevant NNTP response code and the associated error text respectively.**
+* **(constructor)**() - Creates and returns a new NNTP client instance.
 
-**\* Note 2: Methods that return a Boolean success value will immediately return false if the action couldn't be carried out for reasons including: no server connection or the relevant command is not available on that particular server.**
+* **connect**(< _object_ >config) - _(void)_ - Attempts to connect to a server. Valid `config` properties are:
 
-**\* Note 3: A 'filter' parameter is a single (or list of) wildcard-capable newsgroup name filter string(s) ([information on the wildcard format](http://tools.ietf.org/html/rfc3977#section-4.2) and [wildcard examples](http://tools.ietf.org/html/rfc3977#section-4.4)).**
+    * **host** - < _string_ > - Hostname or IP address of the server. **Default:** 'localhost'
 
-### Standard
+    * **port** - < _integer_ > - Port number of the server. **Default:** 119
 
-* **(constructor)**([Object:config]) - Creates and returns a new instance of an nntp connection. config has these options and defaults:
+    * **secure** - < _boolean_ > - Will this be a secure (TLS) connection? **Default:** false
 
-        {
-          host: 'localhost',
-          port: 119,
-          connTimeout: 60000 // connection timeout in milliseconds
-        }
+    * **user** - < _string_ > - Username for authentication. **Default:** (none)
 
-* **connect**([Number:port], [String:host]) - _(void)_ - Attempts to connect to the NNTP server. If the port and host are specified here, they override and overwrite those set in the constructor.
+    * **password** - < _string_ > - Password for password-based user authentication. **Default:** (none)
 
-* **end**() - _(void)_ - Closes the connection to the server.
+    * **connTimeout** - < _integer_ > - Connection timeout in milliseconds. **Default:** 60000
 
-* **auth**([String:username], [String:password], Function:callback) - _Boolean:success_ - Authenticates with the server. The callback has these parameters: the error (undefined if none).
+* **end**() - _(void)_ - Ends the connection with the server.
 
-* **groups**([String/Array:filter], [Boolean:skipEmpty=false], Function:callback) - _Boolean:success_ - Retrieves a list of newsgroups. If skipEmpty is true, newsgroups with no articles will be filtered out. The callback has these parameters: the error (undefined if none) and an EventEmitter. The EventEmitter emits the following events:
+### Mandatory/Common protocol commands
 
-    * **group**(String:groupName, Integer:articleCount, String:status) - Self explanatory. status is 'y' if you are allowed to post, 'n' if you're not, and 'm' if the group is moderated.
+* **dateTime**(< _function_ >callback) - _(void)_ - Retrieves the server's UTC date and time in YYYYMMDDHHMMSS format. `callback` has 2 parameters: < _Error_ >err, < _string_ >datetime.
 
-    * **end**() - Emitted at the end of the group list.
+* **stat**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the article number and message ID for the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 3 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID.
 
-* **groupsDescr**([String/Array:filter], Function:callback) - _Boolean:success_ - Retrieves newsgroup descriptions. The callback has these parameters: the error (undefined if none) and an EventEmitter. The EventEmitter emits the following events:
+* **group**(< _string_ >group, < _function_ >callback) - _(void)_ - Sets the current newsgroup to `group`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >estimatedArticleCount, < _integer_ >firstArticleNum, < _integer_ >lastArticleNum.
 
-    * **description**(String:groupName, String:description) - Self explanatory.
+* **next**(< _function_ >callback) - _(void)_ - Attempts to move to the next article in the current newsgroup. `callback` has 3 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID.
 
-    * **end**() - Emitted at the end of the description list.
+* **prev**(< _function_ >callback) - _(void)_ - Attempts to move to the previous article in the current newsgroup. `callback` has 3 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID.
 
-* **dateTime**(Function:callback) - _Boolean:success_ - Retrieves the server's UTC date and time (24-hour clock). The callback has these parameters: the error (undefined if none) and an Object with these Integer properties: year, month (1-based), date, hour, minute, and second.
+* **headers**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the headers of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _object_ >headers. `headers` values containing an Array stores duplicate header values.
 
-* **articlesSince**(String/Array:filter, Date:date, Function:callback) - _Boolean:success_ - Alternative form of articlesSince that uses a Date object instead of a separate date and time string.
+* **body**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the body of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _string_ >body. `body` is a binary string.
 
-* **articlesSince**(String/Array:filter, String:date, String:time, Function:callback) - _Boolean:success_ - Retrieves message IDs of articles that were posted after the given UTC date (YYYYmmdd) and time (HHMMSS). The callback has these parameters: the error (undefined if none) and an EventEmitter. The EventEmitter emits the following events:
+* **article**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the headers and body of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 5 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _object_ >headers, < _string_ >body. `headers` values containing an Array stores duplicate header values. `body` is a binary string.
 
-    * **messageID**(String:messageID) - Self explanatory.
+### Extended protocol commands -- these _may not_ be implemented or enabled on all servers
 
-    * **end**() - Emitted at the end of the message ID list.
+**\* Note: A `filter` parameter is a single (or Array of) wildcard-capable newsgroup name filter string(s) ([information on the wildcard format](http://tools.ietf.org/html/rfc3977#section-4.2) and [wildcard examples](http://tools.ietf.org/html/rfc3977#section-4.4)).**
 
-* **articleExists**(String:messageID, Function:callback) - _Boolean:success_ - Checks if the server has the article identified by messageID. The callback has these parameters: the error (undefined if none) and a Boolean indicating if the server has the article.
+* **newNews**(< _mixed_ >filter, < _mixed_ >date, [< _string_ >time, ] < _function_ >callback) - _(void)_ - Retrieves the message ID of articles in group(s) matching `filter` on or after a date. This date can be specified with `date` being a Date object, or `date` being a 'YYYYMMDD'-formatted string and `time` being a 'HHMMSS'-formatted string (defaults to midnight) in UTC/GMT. `callback` has 2 parameters: < _Error_ >err, < _array_ >msgIDs.
 
-* **group**(String:groupName, Function:callback) - _Boolean:success_ - Sets the current newsgroup. The callback has these parameters: the error (undefined if none).
+* **groups**(< _mixed_ >filter, < _function_ >callback) - _(void)_ - Retrieves a list of groups matching `filter`. `callback` has 2 parameters: < _Error_ >err, < _array_ >groupsInfo. `groupsInfo` is an array of `[groupName, firstArticleNum, lastArticleNum, status]` rows. Valid statuses are documented [here](http://tools.ietf.org/html/rfc6048#section-3.1).
 
-* **articleNext**(Function:callback) - _Boolean:success_ - Selects the next article in the current newsgroup. The callback has these parameters: the error (undefined if none).
+* **groupsDesc**(< _mixed_ >filter, < _function_ >callback) - _(void)_ - Retrieves a list of group descriptions matching `filter`. `callback` has 2 parameters: < _Error_ >err, < _array_ >groups. `groups` is an array of `[groupName, groupDesc]` rows.
 
-* **articlePrev**(Function:callback) - _Boolean:success_ - Selects the previous article in the current newsgroup. The callback has these parameters: the error (undefined if none).
+* **post**(< _object_ >msg, < _function_ >callback) - _(void)_ - Posts the given `msg` (as defined below) to the current newsgroup. `callback` has 1 parameter: < _Error_ >err.
 
-* **post**(Object:msg, Function:callback) - _Boolean:success_ - Posts the defined msg (as defined below) to the current newsgroup. The callback has these parameters: the error (undefined if none).
-
-    * **Object:from** - Who the message is from (you).
+    * **from** - < _object_ > - Who the message is from.
     
-        * **String:name**
+        * **name** - < _string_ > - Example: 'User'.
         
-        * **String:email** - Example: user@example.com
+        * **email** - < _string_ > - Example: 'user@example.com'.
 
-    * **Array/String:groups** - The newsgroup or list of newsgroups to post the article to.
+    * **groups** - < _mixed_ > - A single newsgroup or array of newsgroups to post this message to.
 
-    * **String:subject** - The subject line.
+    * **subject** - < _string_ > - The subject line.
 
-    * **String:body** - The content.
+    * **body** - < _mixed_ > - The body content -- a string or a Buffer (will be converted to UTF-8 string).
 
-* **headers**([String:messageID], Function:callback) - _Boolean:success_ - Retrieves the headers of a particular article. If messageID is not given, the currently selected article is used. The callback has these parameters: the error (undefined if none), an EventEmitter, and the message ID of the article. The EventEmitter emits the following events:
 
-    * **header**(String:fieldName, String:value) - Self explanatory.
 
-    * **end**() - Emitted at the end of the header list.
+* For methods that return first and last article numbers, the RFC says a group is empty if one of the following is true:
 
-* **body**([String:messageID], Function:callback) - _Boolean:success_ - Retrieves the body of a particular article. If messageID is not given, the currently selected article is used. The callback has these parameters: the error (undefined if none), an EventEmitter, and the message ID of the article. The EventEmitter emits the following events:
+    * The last article number will be one less than the first article number, and
+      the estimated article count will be zero. This is the only time that the
+      last article number can be less than the first article number.
 
-    * **line**(Buffer:lineData) - lineData does not contain the line ending (\r\n).
+    * First and last article numbers (and estimated article count where applicable) are all 0.
 
-    * **end**() - Emitted when the end of the message has been reached.
-
-* **article**([String:messageID], Function:callback) - _Boolean:success_ - Retrieves the headers and body of a particular article. If messageID is not given, the currently selected article is used. The callback has these parameters: the error (undefined if none), an EventEmitter, and the message ID of the article. The EventEmitter emits the following events:
-
-    * **header**(String:fieldName, String:value) - Self explanatory.
-
-    * **line**(Buffer:lineData) - lineData does not contain the line ending (\r\n).
-
-    * **end**() - Emitted when the end of the message has been reached.
+    * The last article number is equal to the first article number. The
+      estimated article count might be zero or non-zero.
