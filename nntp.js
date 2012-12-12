@@ -576,7 +576,7 @@ NNTP.prototype.groups = function(search, cb) {
   }
   if (Array.isArray(search))
     search = search.join(',');
-  search = (search ? search : '');
+  search = (search ? ' ' + search : '');
   this._send('LIST', 'ACTIVE' + search, function(err, code, r, type) {
     if (err)
       return cb(err);
@@ -598,7 +598,7 @@ NNTP.prototype.groupsDesc = function(search, cb) {
     search = '';
   } else if (Array.isArray(search))
     search = search.join(',');
-  search = (search ? search : '');
+  search = (search ? ' ' + search : '');
 
   // According to the RFC:
   //   The description SHOULD be in UTF-8. However, servers often obtain the
