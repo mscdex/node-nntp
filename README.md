@@ -109,7 +109,7 @@ API
 Events
 ------
 
-* **ready**() - Emitted when connection and authentication was successful.
+* **ready**() - Emitted when connection and authentication were successful.
 
 * **close**(< _boolean_ >hadErr) - Emitted when the connection has fully closed.
 
