@@ -1,5 +1,5 @@
 { "name": "nntp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Brian White <mscdex@mscdex.net>",
   "description": "An NNTP client module for node.js",
   "main": "./nntp",
