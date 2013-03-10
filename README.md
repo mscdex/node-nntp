@@ -151,7 +151,7 @@ Methods
 
 * **prev**(< _function_ >callback) - _(void)_ - Attempts to move to the previous article in the current newsgroup. `callback` has 3 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID.
 
-* **headers**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the headers of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _object_ >headers. `headers` values containing an Array stores duplicate header values.
+* **headers**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the headers of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _object_ >headers. `headers` values are always arrays (of strings).
 
 * **body**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the body of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _string_ >body. `body` is a binary string.
 
