@@ -153,9 +153,9 @@ Methods
 
 * **headers**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the headers of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _object_ >headers. `headers` values are always arrays (of strings).
 
-* **body**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the body of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _string_ >body. `body` is a _Buffer_.
+* **body**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the body of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 4 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _Buffer_ >body.
 
-* **article**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the headers and body of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 5 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _object_ >headers, < _string_ >body. `headers` values are always arrays (of strings). `body` is a _Buffer_.
+* **article**([< _string_ >which, ]< _function_ >callback) - _(void)_ - Retrieves the headers and body of the current article if `which` is not given or for the article whose number or message ID is `what`. `callback` has 5 parameters: < _Error_ >err, < _integer_ >articleNum, < _string_ >msgID, < _object_ >headers, < _Buffer_ >body. `headers` values are always arrays (of strings).
 
 ### Extended protocol commands -- these _may not_ be implemented or enabled on all servers
 
