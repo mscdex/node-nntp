@@ -181,6 +181,8 @@ Methods
 
     * **body** - < _mixed_ > - The body content -- a string or a Buffer (will be converted to UTF-8 string).
 
+    * **references** - < _string_ > - Optional string containing the message ids of referenced posts.
+
 
 
 * For methods that return first and last article numbers, the RFC says a group is empty if one of the following is true:
